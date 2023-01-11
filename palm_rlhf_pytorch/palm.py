@@ -24,7 +24,9 @@ def exists(val):
     return val is not None
 
 def default(val, d):
-    return val if exists(val) else d
+    if exists(val):
+        return val
+    return d() if callable(d) else d
 
 def identity(t, *args, **kwargs):
     return t
@@ -475,6 +477,16 @@ class PaLM(nn.Module):
         assert scope in self.finetune_modules, f'finetune parameters of scope {scope} not found'
         return self.finetune_modules[scope].parameters()
 
+    # default tokens
+
+    def default_token_ids(self, batch = 1):
+        device = self.device
+
+        if exists(self.default_start_token_id):
+            return torch.full((batch, 1), self.default_start_token_id, device = device)
+
+        return torch.randint(0, self.num_tokens, (batch, 1), device = device)
+
     # generate function
 
     @torch.no_grad()
@@ -490,17 +502,15 @@ class PaLM(nn.Module):
         eos_token = None,
         return_seq_without_prompt = True,
         use_tqdm = False,
+        context = None,
+        batch_size = 1,
         **kwargs
     ):
         assert self.causal
 
         if not exists(prompt):
-            if exists(self.default_start_token_id):
-                prompt = torch.full((1, 1), self.default_start_token_id)
-            else:
-                prompt = torch.randint(0, self.num_tokens, (1, 1))
-
-            prompt = prompt.to(self.device)
+            batch_size = context.shape[0] if exists(context) else batch_size
+            prompt = self.default_token_ids(batch = batch_size)
             return_seq_without_prompt = False
 
         prompt, leading_dims = pack([prompt], '* n')
@@ -511,7 +521,7 @@ class PaLM(nn.Module):
         sample_num_times = max(1, seq_len - prompt.shape[-1])
 
         for _ in wrapper_fn(range(sample_num_times)):
-            logits, embeds = self.forward(out, return_logits_with_embedding = True, **kwargs)
+            logits, embeds = self.forward(out, return_logits_with_embedding = True, context = context, **kwargs)
             logits, embeds = logits[:, -1], embeds[:, -1]
 
             if exists(filter_logits_fn):
@@ -539,7 +549,7 @@ class PaLM(nn.Module):
 
     def forward(
         self,
-        x,
+        prompt,
         mask = None,
         context = None,
         context_mask = None,
@@ -550,6 +560,8 @@ class PaLM(nn.Module):
         return_only_embedding = False,
         return_logits_with_embedding = False
     ):
+        x = default(prompt, lambda: self.default_token_ids(batch = (context.shape[0] if exists(context) else 1)))
+
         assert not (exists(context) and not self.cross_attend)
 
         if return_loss:
